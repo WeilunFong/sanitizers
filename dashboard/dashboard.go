@@ -21,9 +21,9 @@ var (
 		name, url string
 	}{
 		{"Chromium", ""},
-		{"(FYI) Clang Linux ToT", "https://ci.chromium.org/buildbot/chromium.clang/ToTLinux/"},
-		{"CFI Linux ToT", "https://ci.chromium.org/buildbot/chromium.clang/CFI%20Linux%20ToT/"},
-		{"CFI Linux CF", "https://ci.chromium.org/buildbot/chromium.clang/CFI%20Linux%20CF/"},
+		{"(FYI) Clang Linux ToT", "https://ci.chromium.org/p/chromium/builders/luci.chromium.ci/ToTLinux"},
+		{"CFI Linux ToT", "https://ci.chromium.org/p/chromium/builders/luci.chromium.ci/CFI%20Linux%20ToT"},
+		{"CFI Linux CF", "https://ci.chromium.org/p/chromium/builders/luci.chromium.ci/CFI%20Linux%20CF"},
 		{"Sanitizers", ""},
 		{"windows", "http://lab.llvm.org:8011/builders/sanitizer-windows"},
 		{"x86_64-linux", "http://lab.llvm.org:8011/builders/sanitizer-x86_64-linux"},
@@ -35,6 +35,7 @@ var (
 		{"x86_64-linux-autoconf", "http://lab.llvm.org:8011/builders/sanitizer-x86_64-linux-autoconf"},
 		{"ppc64be-linux", "http://lab.llvm.org:8011/builders/sanitizer-ppc64be-linux"},
 		{"ppc64le-linux", "http://lab.llvm.org:8011/builders/clang-ppc64le-linux-lnt"},
+		{"x86_64-linux-gn", "http://lab.llvm.org:8011/builders/sanitizer-x86_64-linux-gn"},
 		{"LibFuzzer (x86_64-linux)", ""},
 		{"sanitizer", "http://lab.llvm.org:8011/builders/sanitizer-x86_64-linux-fuzzer"},
 		{"chromium-asan", "https://ci.chromium.org/p/chromium/builders/luci.chromium.ci/Libfuzzer%20Upload%20Linux%20ASan/"},
@@ -84,8 +85,8 @@ type status struct {
 }
 
 type statusLine struct {
-	date     string
-	statuses []status
+	lastbuild time.Time
+	statuses  []status
 }
 
 func GetStatus(buildUrl string) (statusLine, error) {
@@ -120,7 +121,7 @@ func GetStatus(buildUrl string) (statusLine, error) {
 		if n.Type == html.ElementNode && n.Data == "table" && class(n) == "info" {
 			for c := n.FirstChild; c != nil; c = c.NextSibling {
 				if c.Type == html.ElementNode && c.Data == "tbody" {
-					date := ""
+					lastbuild := time.Time{}
 					var statuses []status
 					isLuci := false
 					for i, c := range findSubtags(c, "tr") {
@@ -146,14 +147,24 @@ func GetStatus(buildUrl string) (statusLine, error) {
 						var rev int64 = 0
 
 						for i, c := range findSubtags(c, "td") {
-							if i == 0 && date == "" {
-								date = c.FirstChild.Data
+							if i == 0 && lastbuild.IsZero() {
 								// LUCI has slightly different layout/formatting than buildbot
-								if date == "span" {
+								if c.FirstChild.Data == "span" {
 									strtime, err := strconv.ParseInt(attr(c.FirstChild, "data-timestamp"), 10, 64)
 									if err == nil {
-										time := time.Unix(strtime/1000, 0)
-										date = time.Format("Jan 2 15:04")
+										lastbuild = time.Unix(strtime/1000, 0)
+									}
+								} else {
+									loc, err := time.LoadLocation("America/Los_Angeles")
+									if err == nil {
+										parsedtime, err := time.ParseInLocation("Jan 2 15:04", c.FirstChild.Data, loc)
+										if err == nil {
+											lastbuild = parsedtime.AddDate(time.Now().Year(), 0, 0)
+										} else {
+											fmt.Fprintf(os.Stderr, "Failed to parse: %s\n", err.Error())
+										}
+									} else {
+										fmt.Fprintf(os.Stderr, "Failed to load TZ: %s\n", err.Error())
 									}
 								}
 							}
@@ -180,12 +191,12 @@ func GetStatus(buildUrl string) (statusLine, error) {
 
 						statuses = append(statuses, status{buildUrl, rev, success})
 					}
-					return statusLine{date, statuses}
+					return statusLine{lastbuild, statuses}
 				}
 			}
 		}
 		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			if s := f(c); s.date != "" {
+			if s := f(c); !s.lastbuild.IsZero() {
 				return s
 			}
 		}
@@ -213,6 +224,14 @@ type ByName []OssFuzzProject
 func (a ByName) Len() int           { return len(a) }
 func (a ByName) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a ByName) Less(i, j int) bool { return a[i].Name < a[j].Name }
+
+var OssFuzzOurProjects = map[string]bool{
+	"fuzzing-puzzles": true,
+	"libpng-proto": true,
+	"libprotobuf-mutator": true,
+	"llvm": true,
+	"llvm_libcxxabi": true,
+}
 
 func GetOssFuzzStatusString() string {
 	header := "<h2>OSS-Fuzz</h2>"
@@ -248,6 +267,9 @@ func GetOssFuzzStatusString() string {
 	htmlStatuses := ""
 	sort.Sort(ByName(status.Projects))
 	for i := range status.Projects {
+		if !OssFuzzOurProjects[status.Projects[i].Name] {
+			continue
+		}
 		class := "success"
 		for j := range status.Unstable {
 			if status.Unstable[j].Name == status.Projects[i].Name {
@@ -372,8 +394,19 @@ $(function() {
 
 		r := ""
 		date := "??:??"
-		if len(statuses[i].date) >= 5 {
-			date = statuses[i].date[len(statuses[i].date)-5:]
+		if !statuses[i].lastbuild.IsZero() {
+			// Localize times to PST
+			lastbuild := statuses[i].lastbuild
+			loc, err := time.LoadLocation("America/Los_Angeles")
+			if err == nil {
+				lastbuild = lastbuild.In(loc)
+			}
+
+			if time.Now().Sub(lastbuild).Hours() <= 12 {
+				date = lastbuild.Format("15:04")
+			} else {
+				date = lastbuild.Format("<span class=other>Jan 2 15:04</span>")
+			}
 		}
 		r += td("", date+"&nbsp;")
 
@@ -391,7 +424,7 @@ $(function() {
 				errStr = errStr[trim+1:]
 			}
 			r += td(fmt.Sprintf("colspan=%d", maxStatuses+1), span(class(0), errStr))
-		} else if statuses[i].date != "" {
+		} else if !statuses[i].lastbuild.IsZero() {
 			for j := range statuses[i].statuses[:len(statuses[i].statuses)-1] {
 				s := statuses[i].statuses[j]
 				style := class(s.success)

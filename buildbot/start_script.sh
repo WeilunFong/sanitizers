@@ -1,5 +1,7 @@
 #!/bin/bash
 
+# Script to configure GCE instance to run sanitizer build bots.
+
 # NOTE: GCE can wait up to 20 hours before reloading this file.
 # If some instance needs changes sooner just shutdown the instance 
 # with GCE UI or "sudo shutdown now" over ssh. GCE will recreate
@@ -61,6 +63,8 @@ buildslave create-slave --allow-shutdown=signal $BOT_DIR lab.llvm.org:9990 $BOT_
 echo "Vitaly Buka <vitalybuka@google.com>" > $BOT_DIR/info/admin
 
 {
+  echo "How to reproduce locally: https://github.com/google/sanitizers/wiki/SanitizerBotReproduceBuild"
+  echo
   uname -a | head -n1
   cmake --version | head -n1
   g++ --version | head -n1
